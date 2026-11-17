@@ -1,16 +1,69 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # =============================================================================
 # Exploit Search Aggregator — CLI Vulnerability Intelligence & Advisory Search
 # Unified multi-source vulnerability intelligence search engine:
 # MSF | Nuclei | GitHub PoCs | Exploit-DB | PacketStorm | CVE Enrichment
+# Cross-Platform: macOS (Darwin) & Linux (Debian/Kali/Ubuntu, Arch, Fedora)
 # =============================================================================
 
 QUERY=""
 AUTO_MODE=0
-REAL_SEARCHSPLOIT="${SEARCHSPLOIT_BIN:-$(command -v searchsploit 2>/dev/null || echo "searchsploit")}"
-MSF_MODULES_BASE="${MSF_MODULES_PATH:-/opt/metasploit-framework/embedded/framework/modules}"
+
+# ─── PLATFORM & BINARY RESOLUTION ───────────────────────────────────────────
+OS_TYPE="$(uname -s)"
+
+# 1. Exploit-DB / searchsploit resolution
+REAL_SEARCHSPLOIT=""
+if [[ -n "$SEARCHSPLOIT_BIN" ]] && (command -v "$SEARCHSPLOIT_BIN" >/dev/null 2>&1 || [[ -x "$SEARCHSPLOIT_BIN" ]]); then
+    REAL_SEARCHSPLOIT="$SEARCHSPLOIT_BIN"
+elif command -v searchsploit >/dev/null 2>&1; then
+    REAL_SEARCHSPLOIT="$(command -v searchsploit)"
+elif [[ -x "/opt/homebrew/bin/searchsploit" ]]; then
+    REAL_SEARCHSPLOIT="/opt/homebrew/bin/searchsploit"
+elif [[ -x "/usr/local/bin/searchsploit" ]]; then
+    REAL_SEARCHSPLOIT="/usr/local/bin/searchsploit"
+elif [[ -x "/usr/bin/searchsploit" ]]; then
+    REAL_SEARCHSPLOIT="/usr/bin/searchsploit"
+else
+    REAL_SEARCHSPLOIT="searchsploit"
+fi
+
+# 2. Metasploit Framework Modules directory resolution
+MSF_MODULES_BASE=""
+if [[ -n "$MSF_MODULES_PATH" && -d "$MSF_MODULES_PATH" ]]; then
+    MSF_MODULES_BASE="$MSF_MODULES_PATH"
+elif [[ -d "/usr/share/metasploit-framework/modules" ]]; then
+    # Standard Linux / Kali / Debian
+    MSF_MODULES_BASE="/usr/share/metasploit-framework/modules"
+elif [[ -d "/opt/metasploit-framework/embedded/framework/modules" ]]; then
+    # Omnibus package installer (macOS & Linux)
+    MSF_MODULES_BASE="/opt/metasploit-framework/embedded/framework/modules"
+elif [[ -d "/opt/homebrew/opt/metasploit-framework/embedded/framework/modules" ]]; then
+    # Homebrew macOS (Apple Silicon)
+    MSF_MODULES_BASE="/opt/homebrew/opt/metasploit-framework/embedded/framework/modules"
+elif [[ -d "/usr/local/opt/metasploit-framework/embedded/framework/modules" ]]; then
+    # Homebrew macOS (Intel)
+    MSF_MODULES_BASE="/usr/local/opt/metasploit-framework/embedded/framework/modules"
+fi
+
+# 3. Nuclei Templates path
 NUCLEI_TEMPLATES="${NUCLEI_TEMPLATES:-$HOME/nuclei-templates}"
+
+# 4. Syntax Highlighting in fzf preview
+BAT_CMD=""
+if command -v batcat >/dev/null 2>&1; then
+    BAT_CMD="batcat --color=always --style=plain"
+elif command -v bat >/dev/null 2>&1; then
+    BAT_CMD="bat --color=always --style=plain"
+elif command -v pygmentize >/dev/null 2>&1; then
+    BAT_CMD="pygmentize -g"
+else
+    BAT_CMD="cat"
+fi
+
+# 5. Output directory
+EXPLOIT_DIR="${EXPLOIT_OUTPUT_DIR:-./exploits}"
 
 # Parse flags: extract --auto before building QUERY
 for arg in "$@"; do
@@ -23,23 +76,71 @@ done
 QUERY=$(echo "$QUERY" | xargs)  # Trim leading/trailing whitespace
 
 # Pass-through for searchsploit native flags (e.g. -m, -p, --nmap, etc.)
-if [[ "$1" == -* && "$1" != "--auto" ]]; then exec "$REAL_SEARCHSPLOIT" "$@"; fi
-# Non-TTY pass-through only if not in auto mode. In --auto we skip fzf and output plain text.
-if [[ ! -t 1 && "$AUTO_MODE" == 0 ]]; then exec "$REAL_SEARCHSPLOIT" "$@"; fi
+if [[ "$1" == -* && "$1" != "--auto" ]]; then
+    if command -v "$REAL_SEARCHSPLOIT" >/dev/null 2>&1 || [[ -x "$REAL_SEARCHSPLOIT" ]]; then
+        exec "$REAL_SEARCHSPLOIT" "$@"
+    else
+        echo "Error: searchsploit binary not found ($REAL_SEARCHSPLOIT)" >&2
+        exit 1
+    fi
+fi
 
-# Theme
+# Non-TTY pass-through only if not in auto mode. In --auto we skip fzf and output plain text.
+if [[ ! -t 1 && "$AUTO_MODE" == 0 ]]; then
+    if command -v "$REAL_SEARCHSPLOIT" >/dev/null 2>&1 || [[ -x "$REAL_SEARCHSPLOIT" ]]; then
+        exec "$REAL_SEARCHSPLOIT" "$@"
+    else
+        echo "Error: searchsploit binary not found for non-interactive pass-through" >&2
+        exit 1
+    fi
+fi
+
+# ─── THEME & VISUAL ICONS ───────────────────────────────────────────────────
 MAGENTA='\033[1;35m'; CYAN='\033[1;36m'; YELLOW='\033[1;33m'; RED='\033[1;31m'; GREEN='\033[1;32m'; BOLD='\033[1m'; NC='\033[0m'; D='\033[1;30m'
 ICON_LOCAL="💀"; ICON_GITHUB="🐙"; ICON_NUCLEI="🧬"; ICON_MSF="💣"; ICON_RCE="🔥"; ICON_POC="🎯"; ICON_AUTH="🔐"; ICON_PKST="📡"
 
-copy_clipboard() {
+# ─── CROSS-PLATFORM SYSTEM UTILITIES ─────────────────────────────────────────
+
+copy_to_clipboard() {
     local text="$1"
     if command -v pbcopy >/dev/null 2>&1; then
         echo -n "$text" | pbcopy
-    elif command -v xclip >/dev/null 2>&1; then
-        echo -n "$text" | xclip -selection clipboard
+        return 0
+    elif [[ -n "$WAYLAND_DISPLAY" ]] && command -v wl-copy >/dev/null 2>&1; then
+        echo -n "$text" | wl-copy
+        return 0
     elif command -v wl-copy >/dev/null 2>&1; then
         echo -n "$text" | wl-copy
+        return 0
+    elif command -v xclip >/dev/null 2>&1; then
+        echo -n "$text" | xclip -selection clipboard
+        return 0
+    elif command -v xsel >/dev/null 2>&1; then
+        echo -n "$text" | xsel --clipboard --input
+        return 0
+    else
+        echo -e "${YELLOW}⚠ No clipboard utility found (pbcopy, wl-copy, xclip, xsel).${NC}"
+        return 1
     fi
+}
+
+copy_clipboard() {
+    copy_to_clipboard "$@"
+}
+
+open_url() {
+    local url="$1"
+    if command -v open >/dev/null 2>&1 && [[ "$OS_TYPE" == "Darwin" ]]; then
+        open "$url" >/dev/null 2>&1 && return 0
+    elif command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url" >/dev/null 2>&1 && return 0
+    elif command -v open >/dev/null 2>&1; then
+        open "$url" >/dev/null 2>&1 && return 0
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m webbrowser "$url" >/dev/null 2>&1 && return 0
+    fi
+    echo -e "${YELLOW}Open manually: ${CYAN}$url${NC}"
+    return 1
 }
 
 if [ -z "$QUERY" ]; then 
@@ -51,13 +152,14 @@ fi
 
 # ─── CACHING SYSTEM ─────────────────────────────────────────────────────────
 CACHE_TTL=3600
-CACHE_HASH=$(echo -n "$QUERY" | md5 2>/dev/null || echo -n "$QUERY" | md5sum 2>/dev/null | cut -d' ' -f1)
+CACHE_HASH=$( (echo -n "$QUERY" | md5sum 2>/dev/null || echo -n "$QUERY" | md5 2>/dev/null || echo -n "$QUERY" | shasum 2>/dev/null) | awk '{print $1}' )
 CACHE_FILE="/tmp/godsearch_cache_${CACHE_HASH}.json"
 CACHE_HIT=0
 
 if [[ -f "$CACHE_FILE" ]]; then
-    CACHE_AGE=$(( $(date +%s) - $(stat -f%m "$CACHE_FILE" 2>/dev/null || stat -c%Y "$CACHE_FILE" 2>/dev/null || echo 0) ))
-    if [[ "$CACHE_AGE" -lt "$CACHE_TTL" ]]; then
+    CACHE_MTIME=$(stat -f %m "$CACHE_FILE" 2>/dev/null || stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+    CACHE_AGE=$(( $(date +%s) - CACHE_MTIME ))
+    if [[ "$CACHE_AGE" -ge 0 && "$CACHE_AGE" -lt "$CACHE_TTL" ]]; then
         CACHE_HIT=1
     else
         rm -f "$CACHE_FILE" 2>/dev/null
@@ -80,9 +182,11 @@ if [[ -n "$CVE_FULL" ]]; then
         if [[ -n "$CVE_CVSS" ]]; then
             # Color-code CVSS score
             CVSS_COLOR="$GREEN"
-            if (( $(echo "$CVE_CVSS >= 9.0" | bc -l 2>/dev/null) )); then CVSS_COLOR="$RED"
-            elif (( $(echo "$CVE_CVSS >= 7.0" | bc -l 2>/dev/null) )); then CVSS_COLOR='\033[1;33m'
-            elif (( $(echo "$CVE_CVSS >= 4.0" | bc -l 2>/dev/null) )); then CVSS_COLOR="$YELLOW"
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "$CVE_CVSS >= 9.0" | bc -l 2>/dev/null || echo 0) )); then CVSS_COLOR="$RED"
+                elif (( $(echo "$CVE_CVSS >= 7.0" | bc -l 2>/dev/null || echo 0) )); then CVSS_COLOR='\033[1;33m'
+                elif (( $(echo "$CVE_CVSS >= 4.0" | bc -l 2>/dev/null || echo 0) )); then CVSS_COLOR="$YELLOW"
+                fi
             fi
             CVE_HEADER="  🛡️  ${CYAN}${CVE_FULL}${NC} │ CVSS: ${CVSS_COLOR}${CVE_CVSS}${NC} │ State: ${GREEN}${CVE_STATE}${NC}"
         fi
@@ -115,7 +219,6 @@ echo -e "${MAGENTA}Auditing attack surface for: ${BOLD}$QUERY${NC} [Smart Filter
 # Display CVE enrichment header if available
 [[ -n "$CVE_HEADER" ]] && echo -e "$CVE_HEADER"
 
-EXPLOIT_DIR="${EXPLOIT_OUTPUT_DIR:-./exploits}"
 TMP_DIR="/tmp/godsearch_$$"
 mkdir -p "$TMP_DIR" "$EXPLOIT_DIR" 2>/dev/null
 COMBINED_RAW="$TMP_DIR/combined.raw"
@@ -204,8 +307,12 @@ calculate_merit() {
 
 search_local() {
     echo -ne "${CYAN}[i] local.db...   ${NC}"
+    if ! command -v "$REAL_SEARCHSPLOIT" >/dev/null 2>&1 && ! [[ -x "$REAL_SEARCHSPLOIT" ]]; then
+        echo -e "${YELLOW}SKIP (searchsploit not found)${NC}"
+        return
+    fi
     for var in $VARIATIONS; do
-        $REAL_SEARCHSPLOIT -j "$var" --exclude="(/dos/|/papers/)" 2>/dev/null | jq -c '.RESULTS_EXPLOIT[]' 2>/dev/null | while read -r row; do
+        "$REAL_SEARCHSPLOIT" -j "$var" --exclude="(/dos/|/papers/)" 2>/dev/null | jq -c '.RESULTS_EXPLOIT[]' 2>/dev/null | while read -r row; do
             T=$(echo "$row" | jq -r '.Title' 2>/dev/null); I=$(echo "$row" | jq -r '.["EDB-ID"]' 2>/dev/null); P=$(echo "$row" | jq -r '.Path' 2>/dev/null)
             V=$(echo "$row" | jq -r '.Verified' 2>/dev/null); C=$(echo "$row" | jq -r '.Codes' 2>/dev/null)
             M=$(calculate_merit "$T" "LOCAL" "$P" "$V")
@@ -225,26 +332,35 @@ search_github() {
             S=$(echo "$M" | cut -d'|' -f1); R=$(echo "$M" | cut -d'|' -f2); PL=$(echo "$M" | cut -d'|' -f3)
             if [ "$S" -gt 0 ] 2>/dev/null; then echo "$S|$R|GITH|$N|$U|$U|$D||$PL" >> "$COMBINED_RAW"; fi
         done
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${YELLOW}SKIP (gh cli not found)${NC}"
     fi
-    echo -e "${GREEN}OK${NC}"
 }
 
 search_msf() {
     echo -ne "${CYAN}[i] metasploit... ${NC}"
-    if [ -d "$MSF_MODULES_BASE" ]; then
+    if [[ -n "$MSF_MODULES_BASE" && -d "$MSF_MODULES_BASE" ]]; then
         grep -rliE "$QUERY" "$MSF_MODULES_BASE" --include="*.rb" 2>/dev/null | head -n 25 | while read -r module_path; do
             REL_NAME=$(echo "$module_path" | sed "s|$MSF_MODULES_BASE/||" | sed 's/\.rb$//')
             REL_NAME=$(echo "$REL_NAME" | sed -E 's|^exploits/|exploit/|; s|^payloads/|payload/|; s|^encoders/|encoder/|; s|^nops/|nop/|')
             
-            DESC=$(grep -m 1 "'Name'" "$module_path" 2>/dev/null | awk -F"=>" '{print $2}' | sed -E "s/^[[:space:]]*['\"](.*)['\"]\,?/\1/" | xargs 2>/dev/null)
-            [[ -z "$DESC" ]] && DESC=$(grep -m 1 '"Name"' "$module_path" 2>/dev/null | awk -F"=>" '{print $2}' | sed -E 's/^[[:space:]]*["'\''](.*)["'\'']\,?/\1/' | xargs 2>/dev/null)
+            DESC=$(grep -m 1 "'Name'" "$module_path" 2>/dev/null | awk -F"=>" '{print $2}' | sed -E "s/^[[:space:]]*['\"](.*)['\"],?/\1/" | xargs 2>/dev/null)
+            [[ -z "$DESC" ]] && DESC=$(grep -m 1 '"Name"' "$module_path" 2>/dev/null | awk -F"=>" '{print $2}' | sed -E "s/^[[:space:]]*['\"](.*)['\"],?/\1/" | xargs 2>/dev/null)
             
             M=$(calculate_merit "$REL_NAME $DESC" "MSF" "$REL_NAME" "0")
             S=$(echo "$M" | cut -d'|' -f1); R=$(echo "$M" | cut -d'|' -f2); PL=$(echo "$M" | cut -d'|' -f3)
             if [ "$S" -gt 0 ] 2>/dev/null; then echo "$S|$R|MSF|$REL_NAME|$REL_NAME|$REL_NAME|$DESC||$PL" >> "$COMBINED_RAW"; fi
         done
+        echo -e "${GREEN}OK${NC}"
     elif command -v msfconsole >/dev/null 2>&1; then
-        msf_res=$(timeout 10 msfconsole -q -x "search type:exploit $QUERY; exit" 2>/dev/null | grep -E "^exploit/")
+        local timeout_cmd=""
+        if command -v timeout >/dev/null 2>&1; then
+            timeout_cmd="timeout 10"
+        elif command -v gtimeout >/dev/null 2>&1; then
+            timeout_cmd="gtimeout 10"
+        fi
+        msf_res=$($timeout_cmd msfconsole -q -x "search type:exploit $QUERY; exit" 2>/dev/null | grep -E "^exploit/")
         while read -r line; do
             [ -z "$line" ] && continue
             T=$(echo "$line" | awk '{print $1}'); D=$(echo "$line" | cut -c 50-)
@@ -252,13 +368,15 @@ search_msf() {
             S=$(echo "$M" | cut -d'|' -f1); R=$(echo "$M" | cut -d'|' -f2); PL=$(echo "$M" | cut -d'|' -f3)
             if [ "$S" -gt 0 ] 2>/dev/null; then echo "$S|$R|MSF|$T|$T|$T|$D||$PL" >> "$COMBINED_RAW"; fi
         done <<< "$msf_res"
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${YELLOW}SKIP (modules not found)${NC}"
     fi
-    echo -e "${GREEN}OK${NC}"
 }
 
 search_nuclei() {
     echo -ne "${CYAN}[i] nuclei...     ${NC}"
-    if [ -d "$NUCLEI_TEMPLATES" ]; then
+    if [[ -d "$NUCLEI_TEMPLATES" ]]; then
         grep -rliE "$QUERY" "$NUCLEI_TEMPLATES" --include="*.yaml" 2>/dev/null | head -n 25 | while read -r template; do
             T=$(basename "$template" .yaml); P="$template"
             DESC=$(grep -m 1 "name:" "$template" 2>/dev/null | cut -d':' -f2- | xargs 2>/dev/null)
@@ -267,13 +385,20 @@ search_nuclei() {
             S=$(echo "$M" | cut -d'|' -f1); R=$(echo "$M" | cut -d'|' -f2); PL=$(echo "$M" | cut -d'|' -f3)
             if [ "$S" -gt 0 ] 2>/dev/null; then echo "$S|$R|NUCL|$T|$T|$P|$DESC ($SEV)||$PL" >> "$COMBINED_RAW"; fi
         done
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${YELLOW}SKIP (templates not found)${NC}"
     fi
-    echo -e "${GREEN}OK${NC}"
 }
 
 search_packetstorm() {
     echo -ne "${CYAN}[i] packetstorm.. ${NC}"
-    local ENCODED_QUERY=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$QUERY" 2>/dev/null || echo "$QUERY")
+    local ENCODED_QUERY
+    if command -v python3 >/dev/null 2>&1; then
+        ENCODED_QUERY=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$QUERY" 2>/dev/null || echo "$QUERY")
+    else
+        ENCODED_QUERY="$QUERY"
+    fi
     local PKST_HTML
     PKST_HTML=$(curl -s --max-time 8 "https://packetstormsecurity.com/search/?q=${ENCODED_QUERY}" 2>/dev/null)
     
@@ -307,11 +432,11 @@ if [ ! -s "$COMBINED_RAW" ]; then echo -e "${RED}✘ Nothing found.${NC}"; rm -r
 
 # ─── COUNT RESULTS BY SOURCE ────────────────────────────────────────────────
 TOTAL_RESULTS=$(wc -l < "$COMBINED_RAW" | xargs)
-LOC_COUNT=$(grep -c '|LOC|' "$COMBINED_RAW" 2>/dev/null || echo 0)
-GITH_COUNT=$(grep -c '|GITH|' "$COMBINED_RAW" 2>/dev/null || echo 0)
-MSF_COUNT=$(grep -c '|MSF|' "$COMBINED_RAW" 2>/dev/null || echo 0)
-NUCL_COUNT=$(grep -c '|NUCL|' "$COMBINED_RAW" 2>/dev/null || echo 0)
-PKST_COUNT=$(grep -c '|PKST|' "$COMBINED_RAW" 2>/dev/null || echo 0)
+LOC_COUNT=$(grep -c '|LOC|' "$COMBINED_RAW" 2>/dev/null || true); [[ -z "$LOC_COUNT" ]] && LOC_COUNT=0
+GITH_COUNT=$(grep -c '|GITH|' "$COMBINED_RAW" 2>/dev/null || true); [[ -z "$GITH_COUNT" ]] && GITH_COUNT=0
+MSF_COUNT=$(grep -c '|MSF|' "$COMBINED_RAW" 2>/dev/null || true); [[ -z "$MSF_COUNT" ]] && MSF_COUNT=0
+NUCL_COUNT=$(grep -c '|NUCL|' "$COMBINED_RAW" 2>/dev/null || true); [[ -z "$NUCL_COUNT" ]] && NUCL_COUNT=0
+PKST_COUNT=$(grep -c '|PKST|' "$COMBINED_RAW" 2>/dev/null || true); [[ -z "$PKST_COUNT" ]] && PKST_COUNT=0
 echo -e "${D}── ${NC}${BOLD}${TOTAL_RESULTS}${NC} results ${D}│${NC} ${ICON_LOCAL} LOC:${LOC_COUNT} ${ICON_GITHUB} GH:${GITH_COUNT} ${ICON_MSF} MSF:${MSF_COUNT} ${ICON_NUCLEI} NUC:${NUCL_COUNT} ${ICON_PKST} PKT:${PKST_COUNT}"
 
 # ─── AUTO MODE: Skip fzf, pick top result ────────────────────────────────────
@@ -330,7 +455,11 @@ if [[ "$AUTO_MODE" == 1 ]]; then
     case "$SOURCE" in
         LOC)
             cd "$EXPLOIT_DIR" || exit
-            $REAL_SEARCHSPLOIT -m "$ID" > /dev/null 2>&1
+            if command -v "$REAL_SEARCHSPLOIT" >/dev/null 2>&1 || [[ -x "$REAL_SEARCHSPLOIT" ]]; then
+                "$REAL_SEARCHSPLOIT" -m "$ID" > /dev/null 2>&1
+            elif [[ -f "$PATH_VAL" ]]; then
+                cp "$PATH_VAL" "$EXPLOIT_DIR/" 2>/dev/null
+            fi
             echo -e "${GREEN}✔ [AUTO] Exploit $ID mirrored to $EXPLOIT_DIR${NC}"
             ;;
         GITH)
@@ -372,17 +501,39 @@ SELECTED=$(sort -t'|' -k1 -nr "$COMBINED_RAW" | uniq | awk -F'|' -v iloc="$ICON_
     printf "%s %s %s %-4s %s %-80s \033[1;37m[%s]\033[0m\n", color, pli, si, src, ii, title, id;
 }' | fzf --ansi --reverse --height=85% --border=rounded --inline-info --header="Vulnerability Intelligence Search" --preview-window="right:45%:wrap" --preview="
     ID=\$(echo {} | grep -o '\[.*\]' | tr -d '[]');
-    FILE=\$(grep \"|\$ID|\" $COMBINED_RAW | head -n 1 | awk -F'|' '{print \$6}');
-    if [[ \"\$FILE\" == *.yaml ]]; then
-        echo -e \"\033[1;35m🧬 NUCLEI TEMPLATE\033[0m\n---\"
-        cat \"\$FILE\"
+    LINE=\$(grep -F \"|\$ID|\" $COMBINED_RAW | head -n 1);
+    SRC=\$(echo \"\$LINE\" | awk -F'|' '{print \$3}');
+    TITLE=\$(echo \"\$LINE\" | awk -F'|' '{print \$4}');
+    FILE=\$(echo \"\$LINE\" | awk -F'|' '{print \$6}');
+    DESC=\$(echo \"\$LINE\" | awk -F'|' '{print \$7}');
+
+    echo -e \"\033[1;35m==> \$TITLE\033[0m\";
+    echo -e \"\033[1;30mSource: \$SRC | ID: \$ID\033[0m\";
+    if [[ -n \"\$DESC\" ]]; then
+        echo -e \"\033[1;36mDescription: \$DESC\033[0m\";
+    fi
+    echo -e \"--------------------------------------------------\";
+
+    if [[ -f \"\$FILE\" ]]; then
+        $BAT_CMD \"\$FILE\" 2>/dev/null || cat \"\$FILE\"
+    elif [[ \"\$SRC\" == \"MSF\" && -n \"$MSF_MODULES_BASE\" ]]; then
+        FS_PATH=\$(echo \"\$FILE\" | sed -E 's|^exploit/|exploits/|; s|^payload/|payloads/|; s|^encoder/|encoders/|; s|^nop/|nops/|');
+        MSF_FILE=\"$MSF_MODULES_BASE/\${FS_PATH}.rb\";
+        if [[ -f \"\$MSF_FILE\" ]]; then
+            $BAT_CMD \"\$MSF_FILE\" 2>/dev/null || cat \"\$MSF_FILE\"
+        else
+            echo -e \"\033[1;33mMetasploit Module: \$FILE\033[0m\";
+            echo -e \"\033[1;30mModule path not found in local modules directory.\033[0m\";
+        fi
     elif [[ \"\$FILE\" == http* ]]; then
-        echo -e \"\033[1;35m📡 PACKETSTORM ADVISORY\033[0m\n---\"
-        echo -e \"URL: \$FILE\"
-        echo -e \"---\"
-        echo {}
+        echo -e \"\033[1;34mURL:\033[0m \$FILE\";
+        if [[ \"\$SRC\" == \"GITH\" ]]; then
+            echo -e \"\n\033[1;32m🐙 GitHub PoC / Advisory Repository\033[0m\";
+        elif [[ \"\$SRC\" == \"PKST\" ]]; then
+            echo -e \"\n\033[1;32m📡 PacketStorm Security Advisory\033[0m\";
+        fi
     else
-        echo -e \"\033[1;35m󰓾 VULNERABILITY INTEL\033[0m\n--- INFO ---\n{}\"
+        echo -e \"\033[1;37mReference:\033[0m \$FILE\";
     fi
 ")
 
@@ -402,19 +553,32 @@ if [[ -n "$SELECTED" ]]; then
         echo -e "  ${D}[2]${NC} 📥 Download source (.rb) to $EXPLOIT_DIR"
         echo -ne "\n${YELLOW}❯ Selection [1]: ${NC}"; read -r msf_choice
         if [[ "$msf_choice" == "2" ]]; then
-            FS_PATH=$(echo "$PATH_VAL" | sed 's|^exploit/|exploits/|' | sed 's|^payload/|payloads/|' | sed 's|^encoder/|encoders/|' | sed 's|^nop/|nops/|')
-            FULL_MSF_PATH="$MSF_MODULES_BASE/${FS_PATH}.rb"
-            cp "$FULL_MSF_PATH" "$EXPLOIT_DIR/" 2>/dev/null && echo -e "\n${GREEN}✔ MSF Module harvested.${NC}" || echo -e "\n${RED}✘ Error copying module.${NC}"
+            if [[ -n "$MSF_MODULES_BASE" && -d "$MSF_MODULES_BASE" ]]; then
+                FS_PATH=$(echo "$PATH_VAL" | sed -E 's|^exploit/|exploits/|; s|^payload/|payloads/|; s|^encoder/|encoders/|; s|^nop/|nops/|')
+                FULL_MSF_PATH="$MSF_MODULES_BASE/${FS_PATH}.rb"
+                if [[ -f "$FULL_MSF_PATH" ]]; then
+                    cp "$FULL_MSF_PATH" "$EXPLOIT_DIR/" 2>/dev/null && echo -e "\n${GREEN}✔ MSF Module harvested to $EXPLOIT_DIR.${NC}" || echo -e "\n${RED}✘ Error copying module.${NC}"
+                else
+                    echo -e "\n${RED}✘ Module file not found: $FULL_MSF_PATH${NC}"
+                fi
+            else
+                echo -e "\n${YELLOW}MSF modules directory not available locally.${NC}"
+            fi
         else
-            msfconsole -q -x "use $PATH_VAL"
+            if command -v msfconsole >/dev/null 2>&1; then
+                msfconsole -q -x "use $PATH_VAL"
+            else
+                echo -e "\n${YELLOW}msfconsole not found in PATH. Run manually:${NC}\nmsfconsole -q -x 'use $PATH_VAL'"
+            fi
         fi
     elif [[ "$SOURCE" == "NUCL" ]]; then
         echo -e "\n${YELLOW}Nuclei Template detected:${NC}\n 📄 Path: $PATH_VAL"
         echo -e "\n${CYAN}To run this template:${NC}\n nuclei -t $PATH_VAL -u <target>"
         echo -ne "\n${YELLOW}Copy path to clipboard? (y/n) [Y]: ${NC}"; read -r copy_path
         if [[ "$copy_path" != "n" && "$copy_path" != "N" ]]; then
-            copy_clipboard "$PATH_VAL"
-            echo -e "${GREEN}✔ Copied.${NC}"
+            if copy_to_clipboard "$PATH_VAL"; then
+                echo -e "${GREEN}✔ Copied to clipboard.${NC}"
+            fi
         fi
     elif [[ "$SOURCE" == "PKST" ]]; then
         echo -e "\n${YELLOW}📡 PacketStorm advisory detected:${NC}"
@@ -424,16 +588,13 @@ if [[ -n "$SELECTED" ]]; then
         echo -ne "\n${YELLOW}❯ Selection [1]: ${NC}"; read -r pkst_choice
         case "$pkst_choice" in
             2) 
-                copy_clipboard "$PATH_VAL"
-                echo -e "\n${GREEN}✔ URL copied to clipboard.${NC}" 
+                if copy_to_clipboard "$PATH_VAL"; then
+                    echo -e "\n${GREEN}✔ URL copied to clipboard.${NC}"
+                fi
                 ;;
             *) 
-                if command -v xdg-open >/dev/null 2>&1; then
-                    xdg-open "$PATH_VAL" 2>/dev/null && echo -e "\n${GREEN}✔ Opened in browser.${NC}"
-                elif command -v open >/dev/null 2>&1; then
-                    open "$PATH_VAL" 2>/dev/null && echo -e "\n${GREEN}✔ Opened in browser.${NC}"
-                else
-                    echo -e "\n${YELLOW}Open manually: $PATH_VAL${NC}"
+                if open_url "$PATH_VAL"; then
+                    echo -e "\n${GREEN}✔ Opened in browser.${NC}"
                 fi
                 ;;
         esac
@@ -443,7 +604,11 @@ if [[ -n "$SELECTED" ]]; then
             cd "$EXPLOIT_DIR" || exit
             case "$SOURCE" in 
                 LOC) 
-                    $REAL_SEARCHSPLOIT -m "$ID" > /dev/null 2>&1 
+                    if command -v "$REAL_SEARCHSPLOIT" >/dev/null 2>&1 || [[ -x "$REAL_SEARCHSPLOIT" ]]; then
+                        "$REAL_SEARCHSPLOIT" -m "$ID" > /dev/null 2>&1
+                    elif [[ -f "$PATH_VAL" ]]; then
+                        cp "$PATH_VAL" "$EXPLOIT_DIR/" 2>/dev/null
+                    fi
                     ;; 
                 GITH) 
                     if [[ "$PATH_VAL" =~ \.(py|sh|rb|php|js)$ ]]; then 
@@ -458,4 +623,5 @@ if [[ -n "$SELECTED" ]]; then
         fi
     fi
 fi
+
 rm -rf "$TMP_DIR"
