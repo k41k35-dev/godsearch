@@ -1,0 +1,11 @@
+# Staging & Output
+/exploits/
+exploits/
+cache/
+
+# Temporary files & logs
+.DS_Store
+*.tmp
+*.cache
+*.log
+/tmp/godsearch_*
